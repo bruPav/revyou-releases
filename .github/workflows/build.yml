@@ -10,6 +10,10 @@ on:
         description: "Revyou ref to build (default: main)"
         required: false
         default: main
+      platforms:
+        description: "Platforms: all | linux | windows | macos"
+        required: false
+        default: all
   push:
     tags: ['v*']
 
@@ -38,19 +42,29 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "Building Revyou v$V"
 
+  plan:
+    name: Plan matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        run: |
+          case "${{ github.event.inputs.platforms }}" in
+            linux)   M='["ubuntu-latest"]' ;;
+            windows) M='["windows-2022"]' ;;
+            macos)   M='["macos-latest"]' ;;
+            *)       M='["ubuntu-latest","windows-2022","macos-latest"]' ;;
+          esac
+          echo "matrix={\"os\":$M}" >> "$GITHUB_OUTPUT"
+
   build:
     name: ${{ matrix.os }}
-    needs: version
+    needs: [version, plan]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-          # windows-latest now maps to VS 2026, which llama-cpp-sys's CMake
-          # Vulkan shader step fails on; pin the 2022 image for now.
-          - os: windows-2022
-          - os: macos-latest
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: Checkout private source
         uses: actions/checkout@v4
@@ -68,22 +82,22 @@ jobs:
             libx11-dev libxi-dev libxcursor-dev libxrandr-dev \
             libvulkan-dev glslc patchelf spirv-headers
 
-      - name: Install Vulkan SDK (Windows)
-        if: runner.os == 'Windows'
-        uses: jakoch/install-vulkan-sdk-action@v1
-        with:
-          install_runtime: true
-          cache: true
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.96.0"
 
       - uses: Swatinem/rust-cache@v2
 
+      # Linux: GPU via Vulkan. macOS: Metal (default). Windows: CPU-only for
+      # now — llama.cpp's Vulkan shader CMake step fails on GitHub's Windows
+      # runners (MSB8066), so the GPU backend is omitted there.
       - name: Build (release, GPU / Vulkan)
-        if: runner.os != 'macOS'
+        if: runner.os == 'Linux'
         run: cargo build --release --features gpu-vulkan
+
+      - name: Build (release, CPU)
+        if: runner.os == 'Windows'
+        run: cargo build --release
 
       - name: Build (release, macOS / Metal, universal2)
         if: runner.os == 'macOS'
@@ -109,18 +123,12 @@ jobs:
           mkdir -p dist/revyou/icon && cp -r icon/linux dist/revyou/icon/
           tar -czf revyou-linux-x86_64.tar.gz -C dist revyou
 
-      - name: Package Windows (zip, bundled Vulkan loader)
+      - name: Package Windows (zip)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $loader = Join-Path $env:VULKAN_SDK 'Bin\vulkan-1.dll'
-          if (-not (Test-Path $loader)) {
-            $loader = (Get-ChildItem -Path $env:VULKAN_SDK -Recurse -Filter 'vulkan-1.dll' |
-              Select-Object -First 1).FullName
-          }
           New-Item -ItemType Directory -Force -Path dist/revyou | Out-Null
           Copy-Item target/release/revyou.exe dist/revyou/
-          Copy-Item $loader dist/revyou/vulkan-1.dll
           Copy-Item LICENSE dist/revyou/LICENSE
           Compress-Archive -Path dist/revyou -DestinationPath revyou-windows-x86_64.zip
 
@@ -163,8 +171,11 @@ jobs:
           name: Revyou v${{ needs.version.outputs.version }}
           make_latest: true
           body: |
-            Automated builds of Revyou v${{ needs.version.outputs.version }} for
-            Linux, Windows and macOS.
+            Automated builds of Revyou v${{ needs.version.outputs.version }}.
+
+            - Linux: x86_64, GPU (Vulkan)
+            - Windows: x86_64, CPU (GPU/Vulkan build pending)
+            - macOS: universal (Intel + Apple Silicon), Metal
 
             Unsigned: macOS needs right-click → Open on first launch; Windows
             SmartScreen may warn.
