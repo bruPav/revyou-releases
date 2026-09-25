@@ -1,0 +1,138 @@
+name: Build
+
+# Builds Revyou for Linux, Windows and macOS from the private source repo and
+# publishes the binaries here. This repository is public only to hold the
+# compiled builds; the source stays private.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Revyou ref to build (default: main)"
+        required: false
+        default: main
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  SOURCE_REPO: bruPav/Revyou
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Checkout private source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          token: ${{ secrets.REVYOU_PAT }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-dev libxi-dev libxcursor-dev libxrandr-dev \
+            libvulkan-dev glslc patchelf spirv-headers
+
+      - name: Install Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          install_runtime: true
+          cache: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.96.0"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (release, GPU / Vulkan)
+        if: runner.os != 'macOS'
+        run: cargo build --release --features gpu-vulkan
+
+      - name: Build (release, macOS / Metal, universal2)
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+          lipo -create -output target/release/revyou-universal \
+            target/x86_64-apple-darwin/release/revyou \
+            target/aarch64-apple-darwin/release/revyou
+          file target/release/revyou-universal
+
+      - name: Package Linux (tar.gz, bundled Vulkan loader)
+        if: runner.os == 'Linux'
+        run: |
+          patchelf --set-rpath '$ORIGIN' target/release/revyou
+          mkdir -p dist/revyou
+          cp target/release/revyou dist/revyou/
+          cp -L /usr/lib/x86_64-linux-gnu/libvulkan.so.1 dist/revyou/
+          cp LICENSE dist/revyou/LICENSE
+          cp revyou.desktop dist/revyou/
+          cp packaging/linux/install.sh dist/revyou/
+          mkdir -p dist/revyou/icon && cp -r icon/linux dist/revyou/icon/
+          tar -czf revyou-linux-x86_64.tar.gz -C dist revyou
+
+      - name: Package Windows (zip, bundled Vulkan loader)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $loader = Join-Path $env:VULKAN_SDK 'Bin\vulkan-1.dll'
+          if (-not (Test-Path $loader)) {
+            $loader = (Get-ChildItem -Path $env:VULKAN_SDK -Recurse -Filter 'vulkan-1.dll' |
+              Select-Object -First 1).FullName
+          }
+          New-Item -ItemType Directory -Force -Path dist/revyou | Out-Null
+          Copy-Item target/release/revyou.exe dist/revyou/
+          Copy-Item $loader dist/revyou/vulkan-1.dll
+          Copy-Item LICENSE dist/revyou/LICENSE
+          Compress-Archive -Path dist/revyou -DestinationPath revyou-windows-x86_64.zip
+
+      - name: Package macOS (.app + dmg, universal)
+        if: runner.os == 'macOS'
+        run: |
+          APP="Revyou.app"
+          mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
+          cp target/release/revyou-universal "${APP}/Contents/MacOS/revyou"
+          cp macos/Info.plist "${APP}/Contents/"
+          cp icon/revyou.icns "${APP}/Contents/Resources/Revyou.icns"
+          hdiutil create -volname "Revyou" -srcfolder "${APP}" \
+            -ov -format UDZO "revyou-macos-universal.dmg"
+
+      - name: Upload run artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: revyou-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            revyou-linux-x86_64.tar.gz
+            revyou-windows-x86_64.zip
+            revyou-macos-universal.dmg
+
+      - name: Publish to the "latest" release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest builds
+          make_latest: true
+          body: |
+            Automated builds of Revyou for Linux, Windows and macOS.
+            Unsigned (macOS: right-click → Open; Windows: SmartScreen may warn).
+          files: |
+            revyou-linux-x86_64.tar.gz
+            revyou-windows-x86_64.zip
+            revyou-macos-universal.dmg
+          fail_on_unmatched_files: true
