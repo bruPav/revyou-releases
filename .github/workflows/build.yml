@@ -219,6 +219,9 @@ jobs:
       # them (stable filenames at the bucket root). Requires repo secrets:
       # R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY.
       - name: Upload binaries to Cloudflare R2
+        # Tolerate a missing R2 setup without failing the release (the GitHub
+        # release above is already published); remove this once R2 is live.
+        continue-on-error: true
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
