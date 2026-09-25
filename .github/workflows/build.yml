@@ -82,22 +82,33 @@ jobs:
             libx11-dev libxi-dev libxcursor-dev libxrandr-dev \
             libvulkan-dev glslc patchelf spirv-headers
 
+      - name: Install Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          install_runtime: true
+          cache: true
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.96.0"
 
       - uses: Swatinem/rust-cache@v2
 
-      # Linux: GPU via Vulkan. macOS: Metal (default). Windows: CPU-only for
-      # now — llama.cpp's Vulkan shader CMake step fails on GitHub's Windows
-      # runners (MSB8066), so the GPU backend is omitted there.
+      # Linux and Windows: GPU via Vulkan. macOS: Metal (default).
       - name: Build (release, GPU / Vulkan)
         if: runner.os == 'Linux'
         run: cargo build --release --features gpu-vulkan
 
-      - name: Build (release, CPU)
+      # Windows uses the Ninja generator: llama.cpp's Vulkan shader step is a
+      # CMake ExternalProject whose install races under the Visual Studio/MSBuild
+      # generator (MSB8066 / "VCEnd" / missing cmake_install.cmake). Ninja is
+      # single-config and avoids that custom-build-step race.
+      - name: Build (release, Windows / Vulkan, Ninja)
         if: runner.os == 'Windows'
-        run: cargo build --release
+        env:
+          CMAKE_GENERATOR: Ninja
+        run: cargo build --release --features gpu-vulkan
 
       - name: Build (release, macOS / Metal, universal2)
         if: runner.os == 'macOS'
@@ -123,12 +134,18 @@ jobs:
           mkdir -p dist/revyou/icon && cp -r icon/linux dist/revyou/icon/
           tar -czf revyou-linux-x86_64.tar.gz -C dist revyou
 
-      - name: Package Windows (zip)
+      - name: Package Windows (zip, bundled Vulkan loader)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $loader = Join-Path $env:VULKAN_SDK 'Bin\vulkan-1.dll'
+          if (-not (Test-Path $loader)) {
+            $loader = (Get-ChildItem -Path $env:VULKAN_SDK -Recurse -Filter 'vulkan-1.dll' |
+              Select-Object -First 1).FullName
+          }
           New-Item -ItemType Directory -Force -Path dist/revyou | Out-Null
           Copy-Item target/release/revyou.exe dist/revyou/
+          Copy-Item $loader dist/revyou/vulkan-1.dll
           Copy-Item LICENSE dist/revyou/LICENSE
           Compress-Archive -Path dist/revyou -DestinationPath revyou-windows-x86_64.zip
 
@@ -177,7 +194,7 @@ jobs:
             Automated builds of Revyou v${{ needs.version.outputs.version }}.
 
             - Linux: x86_64, GPU (Vulkan)
-            - Windows: x86_64, CPU (GPU/Vulkan build pending)
+            - Windows: x86_64, GPU (Vulkan)
             - macOS: universal (Intel + Apple Silicon), Metal
 
             Unsigned: macOS needs right-click → Open on first launch; Windows
