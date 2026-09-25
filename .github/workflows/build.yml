@@ -21,8 +21,26 @@ env:
   SOURCE_REPO: bruPav/Revyou
 
 jobs:
+  version:
+    name: Read version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          token: ${{ secrets.REVYOU_PAT }}
+      - id: v
+        run: |
+          V=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Building Revyou v$V"
+
   build:
     name: ${{ matrix.os }}
+    needs: version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -122,17 +140,31 @@ jobs:
             revyou-windows-x86_64.zip
             revyou-macos-universal.dmg
 
-      - name: Publish to the "latest" release
+  release:
+    name: Publish release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: Latest builds
+          tag_name: v${{ needs.version.outputs.version }}
+          name: Revyou v${{ needs.version.outputs.version }}
           make_latest: true
           body: |
-            Automated builds of Revyou for Linux, Windows and macOS.
-            Unsigned (macOS: right-click → Open; Windows: SmartScreen may warn).
+            Automated builds of Revyou v${{ needs.version.outputs.version }} for
+            Linux, Windows and macOS.
+
+            Unsigned: macOS needs right-click → Open on first launch; Windows
+            SmartScreen may warn.
           files: |
-            revyou-linux-x86_64.tar.gz
-            revyou-windows-x86_64.zip
-            revyou-macos-universal.dmg
+            artifacts/revyou-linux-x86_64.tar.gz
+            artifacts/revyou-windows-x86_64.zip
+            artifacts/revyou-macos-universal.dmg
           fail_on_unmatched_files: true
