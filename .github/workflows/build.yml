@@ -100,14 +100,24 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo build --release --features gpu-vulkan
 
-      # Windows uses the Ninja generator: llama.cpp's Vulkan shader step is a
-      # CMake ExternalProject whose install races under the Visual Studio/MSBuild
-      # generator (MSB8066 / "VCEnd" / missing cmake_install.cmake). Ninja is
-      # single-config and avoids that custom-build-step race.
-      - name: Build (release, Windows / Vulkan, Ninja)
+      # Pin CMake < 3.27: llama.cpp's Vulkan shader ExternalProject sets
+      # `cmake_policy(CMP0147 NEW)` (parallel custom build steps), which races
+      # the install step under MSBuild on newer CMake (MSB8066 / "VCEnd" /
+      # missing cmake_install.cmake). CMP0147 does not exist in 3.26, so the
+      # branch is skipped. Installed directly from Kitware (no extra action).
+      - name: Use CMake 3.26 (pre-CMP0147)
         if: runner.os == 'Windows'
-        env:
-          CMAKE_GENERATOR: Ninja
+        shell: pwsh
+        run: |
+          $ver = "3.26.6"
+          $dir = "C:\cmake-$ver"
+          Invoke-WebRequest -Uri "https://github.com/Kitware/CMake/releases/download/v$ver/cmake-$ver-windows-x86_64.zip" -OutFile "$env:RUNNER_TEMP\cmake.zip"
+          Expand-Archive "$env:RUNNER_TEMP\cmake.zip" -DestinationPath $dir -Force
+          "$dir\cmake-$ver-windows-x86_64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & "$dir\cmake-$ver-windows-x86_64\bin\cmake.exe" --version
+
+      - name: Build (release, Windows / Vulkan)
+        if: runner.os == 'Windows'
         run: cargo build --release --features gpu-vulkan
 
       - name: Build (release, macOS / Metal, universal2)
